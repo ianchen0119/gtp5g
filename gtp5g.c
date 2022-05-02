@@ -34,6 +34,8 @@
 #include <net/genetlink.h>
 #include <net/netns/generic.h>
 #include <stdbool.h>
+#include <time.h>
+#include <math.h>
 
 #include "gtp5g.h"
 
@@ -102,6 +104,7 @@ struct gtp5g_qer {
     uint8_t         qfi;                /* 8.2.89 QFI */
 
     /* 8.2.115 Averaging Window (Optional) */
+    uint64_t        avg_window = 2000;
 
     uint8_t         ppi;                /* 8.2.116 Paging Policy Indicator */
 
@@ -112,7 +115,19 @@ struct gtp5g_qer {
 
     struct net_device   *dev;
     struct rcu_head     rcu_head;
+    struct qos_meter    ul_meter, dl_meter;
 };
+
+struct qos_meter {
+    uint8_t  type = NON_GBR_METER; /* default type is Non-GBR Flow */
+    time_t   timestmp;
+    uint64_t cir;
+    uint64_t pir;
+    uint64_t cbs;
+    uint64_t pbs;
+    uint64_t tc;
+    uint64_t tp;
+}
 
 struct sdf_filter {
     struct ip_filter_rule *rule;
@@ -2155,7 +2170,7 @@ static int gtp5g_rx(struct gtp5g_pdr *pdr, struct sk_buff *skb,
 {
     int rt = -1;
     struct gtp5g_far *far = pdr->far;
-    //struct gtp5g_qer *qer = pdr->qer;
+    struct gtp5g_qer *qer = pdr->qer;
 
     if (!far) {
         GTP5G_ERR(pdr->dev, "FAR not exists for PDR(%u)\n", pdr->id);
@@ -2163,10 +2178,53 @@ static int gtp5g_rx(struct gtp5g_pdr *pdr, struct sk_buff *skb,
     }
 
     //TODO: QER
-    //if (qer) {
-    //    printk_ratelimited("%s:%d QER Rule found, id(%#x) qfi(%#x)\n", __func__, __LINE__,
-    //        qer->id, qer->qfi);
-    //}
+    if (qer) {
+       printk_ratelimited("%s:%d QER Rule found, id(%#x) qfi(%#x)\n", __func__, __LINE__,
+           qer->id, qer->qfi);
+        time_t cmp_timep, time_diff;
+        struct qos_meter* meter;
+        meter = qer->ul_meter;
+        time(&cmp_timep);
+        if (meter->type == GBR_METER) {
+            time_diff = cmp_timep - meter->timestmp;
+            UPDATE_GBR_METER_BUCKET_COUNTER(meter->tc, meter->cir * (uint64_t) time_diff,
+            meter->cbs);
+            UPDATE_GBR_METER_BUCKET_COUNTER(meter->tp, meter->pir * (uint64_t) time_diff,
+            meter->pbs);
+            if (skb->len > meter->tb){
+                /* red (drop) */
+                rt = gtp5g_drop_skb_encap(skb, pdr->dev, pdr);
+                goto out;
+            } else {
+                if (skb->len > meter->tc) {
+                    /* yellow */
+                    meter->tc -= (uint64_t) skb->len;
+                } else {
+                    /* green */
+                    meter->tc -= (uint64_t) skb->len;
+                    meter->tp -= (uint64_t) skb->len;
+                }
+            }
+        } else {
+            /* Non-GBR */
+            UPDATE_NON_GBR_METER_BUCKET_COUNTER(meter->pir, meter->tc, meter->cir * (uint64_t) time_diff,
+            meter->cbs);
+            UPDATE_GBR_METER_BUCKET_COUNTER(meter->tp, meter->pir,
+            meter->pbs);
+            if (meter->tc > skb->len) {
+                /* green */
+                meter->tc -= (uint64_t) skb->len;
+            } else if (meter->tp > skb->len) {
+                /* yellow */
+                meter->tp -= (uint64_t) skb->len;
+            } else {
+                /* red (drop) */
+                rt = gtp5g_drop_skb_encap(skb, pdr->dev, pdr);
+                goto out;
+            }
+        }
+        
+    }
 
     // TODO: not reading the value of outer_header_removal now,
     // just check if it is assigned.
@@ -3348,7 +3406,48 @@ static int qer_fill(struct gtp5g_qer *qer, struct gtp5g_dev *gtp, struct genl_in
         qer->gbr.ul_low  = nla_get_u8(gbr_param_attrs[GTP5G_QER_GBR_UL_LOW8]);
         qer->gbr.dl_high = nla_get_u32(gbr_param_attrs[GTP5G_QER_GBR_DL_HIGH32]);
         qer->gbr.dl_low  = nla_get_u8(gbr_param_attrs[GTP5G_QER_GBR_DL_LOW8]);
+        qer->ul_meter.type = GBR_METER;
+        qer->dl_meter.type = GBR_METER;
     }
+
+    /* meter timestmp setting */
+    time_t timep;
+    struct qos_meter* dl_meter, ul_meter;
+    dl_meter = &(qer->dl_meter);
+    ul_meter = &(qer->ul_meter);
+    time(&timep);
+    dl_meter->timestmp = timep;
+    ul_meter->timestmp = timep;
+
+    if (qer->ul_meter.type == GBR_METER) {
+        /* GBR (Trtcm)*/
+        double dl_gbr = (double) ((qer->gbr.dl_high << 8) + qer->gbr.dl_low);
+        double ul_gbr = (double) ((qer->gbr.ul_high << 8) + qer->gbr.ul_low);
+        double dl_mbr = (double) ((qer->mbr.dl_high << 8) + qer->mbr.dl_low);
+        double ul_mbr = (double) ((qer->mbr.ul_high << 8) + qer->mbr.ul_low);
+        dl_meter->cir = (uint64_t) ceil(dl_gbr);
+        ul_meter->cir = (uint64_t) ceil(ul_gbr);
+        dl_meter->pir = (uint64_t) ceil(dl_mbr);
+        ul_meter->pir = (uint64_t) ceil(ul_mbr);
+        dl_meter->cbs = dl_meter->cir;
+        ul_meter->cbs = ul_meter->cir;
+        dl_meter->pbs = dl_meter->pir;
+        ul_meter->pbs = ul_meter->pir;
+    } else {
+        /* Non-GBR (Srtcm)
+         * pbs -> ebs
+         */
+        dl_meter->cir = (uint64_t) ceil(dl_mbr);
+        ul_meter->cir = (uint64_t) ceil(ul_mbr);
+        dl_meter->pir = 0;
+        ul_meter->pir = 0;
+        dl_meter->cbs = dl_meter->cir;
+        ul_meter->cbs = ul_meter->cir;
+        dl_meter->pbs = 2 * dl_meter->pir;
+        ul_meter->pbs = 2 * ul_meter->pir;
+    }
+    *dl_meter.tc = *dl_meter.cbs;
+    *dl_meter.tp = *dl_meter.pbs;
 
     if (info->attrs[GTP5G_QER_CORR_ID]) {
         qer->qer_corr_id = nla_get_u32(info->attrs[GTP5G_QER_CORR_ID]);
