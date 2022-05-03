@@ -1514,7 +1514,7 @@ static int gtp5g_handle_skb_ipv4(struct sk_buff *skb, struct net_device *dev,
     struct gtp5g_dev *gtp = netdev_priv(dev);
     struct gtp5g_pdr *pdr;
     struct gtp5g_far *far;
-    //struct gtp5g_qer *qer;
+    struct gtp5g_qer *qer;
     struct iphdr *iph;
 
     /* Read the IP destination address and resolve the PDR.
@@ -1533,11 +1533,57 @@ static int gtp5g_handle_skb_ipv4(struct sk_buff *skb, struct net_device *dev,
 
     /* TODO: QoS rule have to apply before apply FAR 
      * */
-    //qer = pdr->qer;
-    //if (qer) {
-    //    GTP5G_ERR(dev, "%s:%d QER Rule found, id(%#x) qfi(%#x) TODO\n", 
-    //            __func__, __LINE__, qer->id, qer->qfi);
-    //}
+    qer = pdr->qer;
+    if (qer) {
+       GTP5G_ERR(dev, "%s:%d QER Rule found, id(%#x) qfi(%#x) TODO\n", 
+               __func__, __LINE__, qer->id, qer->qfi);
+        time_t cmp_timep, time_diff;
+        struct qos_meter* meter;
+        meter = &qer->dl_meter;
+        time(&cmp_timep);
+        if (meter->type == GBR_METER) {
+            time_diff = cmp_timep - meter->timestmp;
+            UPDATE_GBR_METER_BUCKET_COUNTER(meter->tc, meter->cir * (uint64_t) time_diff,
+            meter->cbs);
+            UPDATE_GBR_METER_BUCKET_COUNTER(meter->tp, meter->pir * (uint64_t) time_diff,
+            meter->pbs);
+            if (skb->len > meter->tb){
+                /* red (drop) */
+                rt = gtp5g_drop_skb_encap(skb, pdr->dev, pdr);
+                goto out;
+            } else {
+                if (skb->len > meter->tc) {
+                    /* yellow */
+                    meter->tc -= (uint64_t) skb->len;
+                } else {
+                    /* green */
+                    meter->tc -= (uint64_t) skb->len;
+                    meter->tp -= (uint64_t) skb->len;
+                }
+            }
+        } else {
+            /* Non-GBR */
+            UPDATE_NON_GBR_METER_BUCKET_COUNTER(meter->pir, meter->tc, meter->cir * (uint64_t) time_diff,
+            meter->cbs);
+            UPDATE_GBR_METER_BUCKET_COUNTER(meter->tp, meter->pir,
+            meter->pbs);
+            if (meter->tc > skb->len) {
+                /* green */
+                meter->tc -= (uint64_t) skb->len;
+                /* TODO: Setting DSCP */
+            } else if (meter->tp > skb->len) {
+                /* yellow */
+                meter->tp -= (uint64_t) skb->len;
+                /* TODO: Setting DSCP */
+            } else {
+                /* red (drop) */
+                /* TODO: Setting DSCP */
+                // ref1: https://docs.huihoo.com/doxygen/linux/kernel/3.7/inet__ecn_8h_source.html
+                // ref2: https://github.com/awaiskhalidawan/diff-serv-code-point/blob/main/main.cpp
+            }
+        }
+        meter->timestmp = cmp_timep;
+    }
 
     far = pdr->far;
     if (far) {
@@ -2183,7 +2229,7 @@ static int gtp5g_rx(struct gtp5g_pdr *pdr, struct sk_buff *skb,
            qer->id, qer->qfi);
         time_t cmp_timep, time_diff;
         struct qos_meter* meter;
-        meter = qer->ul_meter;
+        meter = &qer->ul_meter;
         time(&cmp_timep);
         if (meter->type == GBR_METER) {
             time_diff = cmp_timep - meter->timestmp;
@@ -2214,16 +2260,19 @@ static int gtp5g_rx(struct gtp5g_pdr *pdr, struct sk_buff *skb,
             if (meter->tc > skb->len) {
                 /* green */
                 meter->tc -= (uint64_t) skb->len;
+                /* TODO: Setting DSCP */
             } else if (meter->tp > skb->len) {
                 /* yellow */
                 meter->tp -= (uint64_t) skb->len;
+                /* TODO: Setting DSCP */
             } else {
                 /* red (drop) */
-                rt = gtp5g_drop_skb_encap(skb, pdr->dev, pdr);
-                goto out;
+                /* TODO: Setting DSCP */
+                // ref1: https://docs.huihoo.com/doxygen/linux/kernel/3.7/inet__ecn_8h_source.html
+                // ref2: https://github.com/awaiskhalidawan/diff-serv-code-point/blob/main/main.cpp
             }
         }
-        
+        meter->timestmp = cmp_timep;
     }
 
     // TODO: not reading the value of outer_header_removal now,
