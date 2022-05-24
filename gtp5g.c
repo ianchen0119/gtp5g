@@ -1570,16 +1570,12 @@ static int gtp5g_handle_skb_ipv4(struct sk_buff *skb, struct net_device *dev,
             if (meter->tc > skb->len) {
                 /* green */
                 meter->tc -= (uint64_t) skb->len;
-                /* TODO: Setting DSCP */
             } else if (meter->tp > skb->len) {
                 /* yellow */
                 meter->tp -= (uint64_t) skb->len;
-                /* TODO: Setting DSCP */
             } else {
                 /* red (drop) */
-                /* TODO: Setting DSCP */
-                // ref1: https://docs.huihoo.com/doxygen/linux/kernel/3.7/inet__ecn_8h_source.html
-                // ref2: https://github.com/awaiskhalidawan/diff-serv-code-point/blob/main/main.cpp
+                return gtp5g_drop_skb_ipv4(skb, dev, pdr);
             }
         }
         meter->timestmp = cmp_timep;
@@ -2260,16 +2256,12 @@ static int gtp5g_rx(struct gtp5g_pdr *pdr, struct sk_buff *skb,
             if (meter->tc > skb->len) {
                 /* green */
                 meter->tc -= (uint64_t) skb->len;
-                /* TODO: Setting DSCP */
             } else if (meter->tp > skb->len) {
                 /* yellow */
                 meter->tp -= (uint64_t) skb->len;
-                /* TODO: Setting DSCP */
             } else {
                 /* red (drop) */
-                /* TODO: Setting DSCP */
-                // ref1: https://docs.huihoo.com/doxygen/linux/kernel/3.7/inet__ecn_8h_source.html
-                // ref2: https://github.com/awaiskhalidawan/diff-serv-code-point/blob/main/main.cpp
+                return gtp5g_drop_skb_ipv4(skb, dev, pdr);
             }
         }
         meter->timestmp = cmp_timep;
