@@ -34,8 +34,7 @@
 #include <net/genetlink.h>
 #include <net/netns/generic.h>
 #include <stdbool.h>
-#include <time.h>
-#include <math.h>
+#include <linux/time.h>
 
 #include "gtp5g.h"
 
@@ -77,9 +76,9 @@ struct local_f_teid {
 };
 
 struct ip_filter_rule {
-    uint8_t action;                     // permit only
-    uint8_t direction;                  // in/out
-    uint8_t proto;                      // number or "ip" which is not used for matching
+    u8 action;                     // permit only
+    u8 direction;                  // in/out
+    u8 proto;                      // number or "ip" which is not used for matching
     struct in_addr src, smask;          // ip addr or "any" -> 0.0.0.0
     struct in_addr dest, dmask;         // ip addr or "any" -> 0.0.0.0
     int sport_num;                      // Conut for sport
@@ -88,54 +87,55 @@ struct ip_filter_rule {
     struct range *dport;                // one value, range or not existed -> [0, 0]
 };
 
+struct qos_meter {
+    u8  type; /* default type is Non-GBR Flow */
+    u64 cir;
+    u64 pir;
+    u64 cbs;
+    u64 pbs;
+    u64 tc;
+    u64 tp;
+    struct timespec64 timestmp;
+};
+
 struct gtp5g_qer {
     struct hlist_node    hlist_id;
 
     u64                     seid;
 
     u32 id;                             /* 8.2.75 QER_ID */
-    uint8_t     ul_dl_gate;             /* 8.2.7 Gate Status */
+    u8     ul_dl_gate;             /* 8.2.7 Gate Status */
     struct {
-        uint32_t    ul_high;
-        uint8_t     ul_low;
-        uint32_t    dl_high;
-        uint8_t     dl_low;
+        u32    ul_high;
+        u8     ul_low;
+        u32    dl_high;
+        u8     dl_low;
     } mbr;                              /* 8.2.8 MBR */
     struct {
-        uint32_t    ul_high;
-        uint8_t     ul_low;
-        uint32_t    dl_high;
-        uint8_t     dl_low;
+        u32    ul_high;
+        u8     ul_low;
+        u32    dl_high;
+        u8     dl_low;
     } gbr;                              /* 8.2.9 GBR */
-    uint32_t        qer_corr_id;        /* 8.2.10 QER Correlation ID  */
-    uint8_t         rqi;                /* 8.2.88 RQI */
-    uint8_t         qfi;                /* 8.2.89 QFI */
+    u32        qer_corr_id;        /* 8.2.10 QER Correlation ID  */
+    u8         rqi;                /* 8.2.88 RQI */
+    u8         qfi;                /* 8.2.89 QFI */
 
     /* 8.2.115 Averaging Window (Optional) */
-    uint64_t        avg_window = 2000;
+    u64        avg_window;
 
-    uint8_t         ppi;                /* 8.2.116 Paging Policy Indicator */
+    u8         ppi;                /* 8.2.116 Paging Policy Indicator */
 
     /* 8.2.139 Packet Rate Status */
 
     /* Rate Control Status Reporting */
-    uint8_t         rcsr;               /* 8.2.174 QER Control Indications */
+    u8         rcsr;               /* 8.2.174 QER Control Indications */
 
     struct net_device   *dev;
     struct rcu_head     rcu_head;
-    struct qos_meter    ul_meter, dl_meter;
+    struct qos_meter    ul_meter;
+    struct qos_meter    dl_meter;
 };
-
-struct qos_meter {
-    uint8_t  type = NON_GBR_METER; /* default type is Non-GBR Flow */
-    time_t   timestmp;
-    uint64_t cir;
-    uint64_t pir;
-    uint64_t cbs;
-    uint64_t pbs;
-    uint64_t tc;
-    uint64_t tp;
-}
 
 struct sdf_filter {
     struct ip_filter_rule *rule;
@@ -169,7 +169,7 @@ struct forwarding_policy {
 };
 
 struct forwarding_parameter {
-    //uint8_t dest_int;
+    //u8 dest_int;
     //char *network_instance;
 
     struct outer_header_creation *hdr_creation;
@@ -1588,42 +1588,42 @@ static int gtp5g_handle_skb_ipv4(struct sk_buff *skb, struct net_device *dev,
     if (qer) {
        GTP5G_ERR(dev, "%s:%d QER Rule found, id(%#x) qfi(%#x) TODO\n", 
                __func__, __LINE__, qer->id, qer->qfi);
-        time_t cmp_timep, time_diff;
+        struct timespec64 cmp_timep;
+        time64_t time_diff;
         struct qos_meter* meter;
-        meter = &qer->dl_meter;
-        time(&cmp_timep);
+        meter = &(qer->dl_meter);
+        do_settimeofday64(&cmp_timep);
         if (meter->type == GBR_METER) {
-            time_diff = cmp_timep - meter->timestmp;
-            UPDATE_GBR_METER_BUCKET_COUNTER(meter->tc, meter->cir * (uint64_t) time_diff,
+            time_diff = cmp_timep.tv_sec - meter->timestmp.tv_sec;
+            UPDATE_GBR_METER_BUCKET_COUNTER(meter->tc, meter->cir * (u64) time_diff,
             meter->cbs);
-            UPDATE_GBR_METER_BUCKET_COUNTER(meter->tp, meter->pir * (uint64_t) time_diff,
+            UPDATE_GBR_METER_BUCKET_COUNTER(meter->tp, meter->pir * (u64) time_diff,
             meter->pbs);
-            if (skb->len > meter->tb){
+            if (skb->len > meter->tp){
                 /* red (drop) */
-                rt = gtp5g_drop_skb_encap(skb, pdr->dev, pdr);
-                goto out;
+                return gtp5g_drop_skb_ipv4(skb, pdr->dev, pdr);
             } else {
                 if (skb->len > meter->tc) {
                     /* yellow */
-                    meter->tc -= (uint64_t) skb->len;
+                    meter->tc -= (u64)(skb->len);
                 } else {
                     /* green */
-                    meter->tc -= (uint64_t) skb->len;
-                    meter->tp -= (uint64_t) skb->len;
+                    meter->tc -= (u64) skb->len;
+                    meter->tp -= (u64) skb->len;
                 }
             }
         } else {
             /* Non-GBR */
-            UPDATE_NON_GBR_METER_BUCKET_COUNTER(meter->pir, meter->tc, meter->cir * (uint64_t) time_diff,
+            UPDATE_NON_GBR_METER_BUCKET_COUNTER(meter->pir, meter->tc, meter->cir * (u64) time_diff,
             meter->cbs);
             UPDATE_GBR_METER_BUCKET_COUNTER(meter->tp, meter->pir,
             meter->pbs);
             if (meter->tc > skb->len) {
                 /* green */
-                meter->tc -= (uint64_t) skb->len;
+                meter->tc -= (u64) skb->len;
             } else if (meter->tp > skb->len) {
                 /* yellow */
-                meter->tp -= (uint64_t) skb->len;
+                meter->tp -= (u64) skb->len;
             } else {
                 /* red (drop) */
                 return gtp5g_drop_skb_ipv4(skb, dev, pdr);
@@ -2278,45 +2278,46 @@ static int gtp5g_rx(struct gtp5g_pdr *pdr, struct sk_buff *skb,
     if (qer) {
        printk_ratelimited("%s:%d QER Rule found, id(%#x) qfi(%#x)\n", __func__, __LINE__,
            qer->id, qer->qfi);
-        time_t cmp_timep, time_diff;
+        struct timespec64 cmp_timep;
+        time64_t time_diff;
         struct qos_meter* meter;
-        meter = &qer->ul_meter;
-        time(&cmp_timep);
+        meter = &(qer->ul_meter);
+        do_settimeofday64(&cmp_timep);
         if (meter->type == GBR_METER) {
-            time_diff = cmp_timep - meter->timestmp;
-            UPDATE_GBR_METER_BUCKET_COUNTER(meter->tc, meter->cir * (uint64_t) time_diff,
+            time_diff = cmp_timep.tv_sec - meter->timestmp.tv_sec;
+            UPDATE_GBR_METER_BUCKET_COUNTER(meter->tc, meter->cir * (u64) time_diff,
             meter->cbs);
-            UPDATE_GBR_METER_BUCKET_COUNTER(meter->tp, meter->pir * (uint64_t) time_diff,
+            UPDATE_GBR_METER_BUCKET_COUNTER(meter->tp, meter->pir * (u64) time_diff,
             meter->pbs);
-            if (skb->len > meter->tb){
+            if (skb->len > meter->tp){
                 /* red (drop) */
                 rt = gtp5g_drop_skb_encap(skb, pdr->dev, pdr);
                 goto out;
             } else {
                 if (skb->len > meter->tc) {
                     /* yellow */
-                    meter->tc -= (uint64_t) skb->len;
+                    meter->tc -= (u64) skb->len;
                 } else {
                     /* green */
-                    meter->tc -= (uint64_t) skb->len;
-                    meter->tp -= (uint64_t) skb->len;
+                    meter->tc -= (u64) skb->len;
+                    meter->tp -= (u64) skb->len;
                 }
             }
         } else {
             /* Non-GBR */
-            UPDATE_NON_GBR_METER_BUCKET_COUNTER(meter->pir, meter->tc, meter->cir * (uint64_t) time_diff,
+            UPDATE_NON_GBR_METER_BUCKET_COUNTER(meter->pir, meter->tc, meter->cir * (u64) time_diff,
             meter->cbs);
             UPDATE_GBR_METER_BUCKET_COUNTER(meter->tp, meter->pir,
             meter->pbs);
             if (meter->tc > skb->len) {
                 /* green */
-                meter->tc -= (uint64_t) skb->len;
+                meter->tc -= (u64) skb->len;
             } else if (meter->tp > skb->len) {
                 /* yellow */
-                meter->tp -= (uint64_t) skb->len;
+                meter->tp -= (u64) skb->len;
             } else {
                 /* red (drop) */
-                return gtp5g_drop_skb_ipv4(skb, dev, pdr);
+                return gtp5g_drop_skb_ipv4(skb, pdr->dev, pdr);
             }
         }
         meter->timestmp = cmp_timep;
@@ -3493,6 +3494,8 @@ static int qer_fill(struct gtp5g_qer *qer, struct gtp5g_dev *gtp, struct genl_in
         qer->mbr.ul_low  = nla_get_u8(mbr_param_attrs[GTP5G_QER_MBR_UL_LOW8]);
         qer->mbr.dl_high = nla_get_u32(mbr_param_attrs[GTP5G_QER_MBR_DL_HIGH32]);
         qer->mbr.dl_low  = nla_get_u8(mbr_param_attrs[GTP5G_QER_MBR_DL_LOW8]);
+        qer->ul_meter.type = NON_GBR_METER;
+        qer->dl_meter.type = NON_GBR_METER;
     }
 
     /* GBR */
@@ -3507,24 +3510,24 @@ static int qer_fill(struct gtp5g_qer *qer, struct gtp5g_dev *gtp, struct genl_in
     }
 
     /* meter timestmp setting */
-    time_t timep;
-    struct qos_meter* dl_meter, ul_meter;
+    struct timespec64 timep;
+    struct qos_meter *dl_meter, *ul_meter;
     dl_meter = &(qer->dl_meter);
     ul_meter = &(qer->ul_meter);
-    time(&timep);
+    do_settimeofday64(&timep);
     dl_meter->timestmp = timep;
     ul_meter->timestmp = timep;
+    u64 dl_gbr = (qer->gbr.dl_high << 8) + qer->gbr.dl_low;
+    u64 ul_gbr = (qer->gbr.ul_high << 8) + qer->gbr.ul_low;
+    u64 dl_mbr = (qer->mbr.dl_high << 8) + qer->mbr.dl_low;
+    u64 ul_mbr = (qer->mbr.ul_high << 8) + qer->mbr.ul_low;
 
     if (qer->ul_meter.type == GBR_METER) {
         /* GBR (Trtcm)*/
-        double dl_gbr = (double) ((qer->gbr.dl_high << 8) + qer->gbr.dl_low);
-        double ul_gbr = (double) ((qer->gbr.ul_high << 8) + qer->gbr.ul_low);
-        double dl_mbr = (double) ((qer->mbr.dl_high << 8) + qer->mbr.dl_low);
-        double ul_mbr = (double) ((qer->mbr.ul_high << 8) + qer->mbr.ul_low);
-        dl_meter->cir = (uint64_t) ceil(dl_gbr);
-        ul_meter->cir = (uint64_t) ceil(ul_gbr);
-        dl_meter->pir = (uint64_t) ceil(dl_mbr);
-        ul_meter->pir = (uint64_t) ceil(ul_mbr);
+        dl_meter->cir = dl_gbr;
+        ul_meter->cir = ul_gbr;
+        dl_meter->pir = dl_mbr;
+        ul_meter->pir = ul_mbr;
         dl_meter->cbs = dl_meter->cir;
         ul_meter->cbs = ul_meter->cir;
         dl_meter->pbs = dl_meter->pir;
@@ -3533,8 +3536,8 @@ static int qer_fill(struct gtp5g_qer *qer, struct gtp5g_dev *gtp, struct genl_in
         /* Non-GBR (Srtcm)
          * pbs -> ebs
          */
-        dl_meter->cir = (uint64_t) ceil(dl_mbr);
-        ul_meter->cir = (uint64_t) ceil(ul_mbr);
+        dl_meter->cir = dl_mbr;
+        ul_meter->cir = ul_mbr;
         dl_meter->pir = 0;
         ul_meter->pir = 0;
         dl_meter->cbs = dl_meter->cir;
@@ -3542,8 +3545,8 @@ static int qer_fill(struct gtp5g_qer *qer, struct gtp5g_dev *gtp, struct genl_in
         dl_meter->pbs = 2 * dl_meter->pir;
         ul_meter->pbs = 2 * ul_meter->pir;
     }
-    *dl_meter.tc = *dl_meter.cbs;
-    *dl_meter.tp = *dl_meter.pbs;
+    dl_meter->tc = dl_meter->cbs;
+    dl_meter->tp = dl_meter->pbs;
 
     if (info->attrs[GTP5G_QER_CORR_ID]) {
         qer->qer_corr_id = nla_get_u32(info->attrs[GTP5G_QER_CORR_ID]);

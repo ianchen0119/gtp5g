@@ -439,14 +439,15 @@ enum gtp5g_qer_gbr_attrs {
 };
 #define GTP5G_QER_GBR_ATTR_MAX (__GTP5G_QER_GBR_ATTR_MAX - 1)
 
+#define UPDATE_GBR_METER_BUCKET_COUNTER(COUNTER, VAL, MAXIMUM) COUNTER = (COUNTER + VAL > MAXIMUM) ? (MAXIMUM) : (COUNTER + VAL)
+#define UPDATE_NON_GBR_METER_BUCKET_COUNTER(REDUNDANT, COUNTER, VAL, MAXIMUM) REDUNDANT = (COUNTER + VAL > MAXIMUM) ? (COUNTER + VAL - MAXIMUM) : (0); \
+UPDATE_GBR_METER_BUCKET_COUNTER(COUNTER, VAL, MAXIMUM)
+
 enum meter_type {
     NON_GBR_METER = 0,
     GBR_METER = 1,
-}
+};
 
-#define UPDATE_GBR_METER_BUCKET_COUNTER(COUNTER, VAL, MAXIMUM) COUNTER = (COUNTER + VAL > MAXIMUM) ? (MAXIMUM) : (COUNTER + VAL)
-#define UPDATE_NON_GBR_METER_BUCKET_COUNTER(REDUNDANT, COUNTER, VAL, MAXIMUM) REDUNDANT = (COUNTER + VAL > MAXIMUM) ? (COUNTER + VAL - MAXIMUM) : (0); \
-                                            UPDATE_GBR_METER_BUCKET_COUNTER(COUNTER, VAL, MAXIMUM)
 /* ------------------------------------------------------------------
  *                              URR
  * ------------------------------------------------------------------
